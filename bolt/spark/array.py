@@ -16,10 +16,10 @@ class BoltArraySpark(BoltArray):
         '_shape': None,
         '_split': None,
         '_dtype': None,
-        '_ordered': False
+        '_ordered': True
     }
 
-    def __init__(self, rdd, shape=None, split=None, dtype=None, ordered=False):
+    def __init__(self, rdd, shape=None, split=None, dtype=None, ordered=True):
         self._rdd = rdd
         self._shape = shape
         self._split = split
@@ -519,7 +519,8 @@ class BoltArraySpark(BoltArray):
         idx = list(index[loc])
 
         if isinstance(idx[0], (tuple, list, ndarray)):
-            raise ValueError("When mixing basic and advanced indexing, advanced index must be one-dimensional")
+            raise ValueError("When mixing basic and advanced indexing, "
+                             "advanced index must be one-dimensional")
 
         # single advanced index is on a key -- filter and update key
         if loc < self.split:
@@ -595,8 +596,8 @@ class BoltArraySpark(BoltArray):
                 minval = min(pos)
                 maxval = max(pos)
                 if minval < 0 or maxval > size-1:
-                    raise ValueError("Index {} out of bounds in dimension {} with shape {}".format(idx, n, size))
-
+                    raise ValueError("Index {} out of bounds in dimension {} with "
+                                     "shape {}".format(idx, n, size))
 
         # convert ints to lists if not all ints and slices
         if not all([isinstance(i, (int, slice)) for i in index]):
