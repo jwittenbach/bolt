@@ -2,6 +2,7 @@
 Generic tests for all BoltArrays
 """
 from __future__ import print_function
+from numpy import dtype
 from bolt.utils import allclose
 import pytest
 
@@ -67,6 +68,14 @@ def map_suite(arr, b):
         func3 = lambda x: ones(10) if nonuniform_map(x) < 0.5 else ones(5)
         mapped = b.map(func3)
         res = mapped.toarray()
+
+    # check that changes in dtype are correctly handled
+    if b.mode == 'spark':
+        func3 = lambda x: x.astype('float32')
+        mapped = b.map(func3, axis=0)
+        assert mapped.dtype == dtype('float32')
+        mapped = b.map(func3, axis=0, dtype=dtype('float32'))
+        assert mapped.dtype == dtype('float32')
 
 def reduce_suite(arr, b):
     """
@@ -141,6 +150,13 @@ def filter_suite(arr, b):
     assert res.shape[1:] == b.shape[1:]
     assert res.shape[0] <= b.shape[0]
 
+    # rerun with sorting
+    if not b.mode == "local":
+        filtered = b.filter(lambda x: filter_half(x) < 0.5, sort=True)
+        res = filtered.toarray()
+        assert res.shape[1:] == b.shape[1:]
+        assert res.shape[0] <= b.shape[0]
+
     # filter out half of the values over the second axis
     filtered = b.filter(lambda x: filter_half(x) < 0.5, axis=1)
     res = filtered.toarray()
@@ -154,3 +170,19 @@ def filter_suite(arr, b):
     assert res.shape[0] <= b.shape[2]
     assert res.shape[1] == b.shape[0]
     assert res.shape[2] == b.shape[1]
+
+    # filter all values over the first axis
+    filtered = b.filter(lambda x: False, axis=(0, 1))
+    res = filtered.toarray()
+    assert res.shape == (0,)
+
+    # filter no values over the first axis
+    filtered = b.filter(lambda x: True)
+    res = filtered.toarray()
+    assert res.shape == b.shape
+
+    # filter out half of the values over the first two axes
+    filtered = b.filter(lambda x: filter_half(x) < 0.5, axis=(0, 1))
+    res = filtered.toarray()
+    assert res.shape[0] <= b.shape[0]*b.shape[1]
+    assert res.shape[1] == b.shape[2]

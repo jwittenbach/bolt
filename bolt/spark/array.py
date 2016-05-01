@@ -108,7 +108,7 @@ class BoltArraySpark(BoltArray):
         from bolt.local.array import BoltArrayLocal
         return BoltArrayLocal(self._rdd.values().first())
 
-    def map(self, func, axis=(0,), value_shape=None, with_keys=False):
+    def map(self, func, axis=(0,), value_shape=None, dtype=None, with_keys=False):
         """
         Apply a function across an axis.
 
@@ -127,6 +127,9 @@ class BoltArraySpark(BoltArray):
         value_shape : tuple, optional, default=None
             Known shape of values resulting from operation
 
+        dtype: numpy.dtype, optional, default=None
+            Known dtype of values resulting from operation
+
         with_keys : bool, optional, default=False
             Include keys as an argument to the function
 
@@ -142,17 +145,19 @@ class BoltArraySpark(BoltArray):
         else:
             test_func = func
 
-        if value_shape is None:
+        if value_shape is None or dtype is None:
             # try to compute the size of each mapped element by applying func to a random array
-            value_shape = None
             try:
-                value_shape = test_func(random.randn(*swapped.values.shape).astype(self.dtype)).shape
+                mapped = test_func(random.randn(*swapped.values.shape).astype(self.dtype))
             except Exception:
                 first = swapped._rdd.first()
                 if first:
                     # eval func on the first element
                     mapped = test_func(first[1])
-                    value_shape = mapped.shape
+            if value_shape is None:
+                value_shape = mapped.shape
+            if dtype is None:
+                dtype = mapped.dtype
 
         shape = tuple([swapped._shape[ax] for ax in range(len(axis))]) + tupleize(value_shape)
 
@@ -169,9 +174,9 @@ class BoltArraySpark(BoltArray):
 
         rdd = rdd.mapValues(lambda v: check(v))
 
-        return self._constructor(rdd, shape=shape, split=swapped.split).__finalize__(swapped)
+        return self._constructor(rdd, shape=shape, dtype=dtype, split=swapped.split).__finalize__(swapped)
 
-    def filter(self, func, axis=(0,)):
+    def filter(self, func, axis=(0,), sort=False):
         """
         Filter array along an axis.
 
@@ -188,17 +193,23 @@ class BoltArraySpark(BoltArray):
         axis : tuple or int, optional, default=(0,)
             Axis or multiple axes to filter along.
 
+        sort: bool, optional, default=False
+            Whether or not to sort by key before reindexing
+
         Returns
         -------
         BoltArraySpark
         """
         axis = tupleize(axis)
-        if len(axis) != 1:
-            raise NotImplementedError("Filtering over multiple axes will not be "
-                                      "supported until SparseBoltArray is implemented.")
 
         swapped = self._align(axis)
-        rdd = swapped._rdd.values().filter(func)
+        def f(record):
+            return func(record[1])
+        rdd = swapped._rdd.filter(f)
+        if sort:
+            rdd = rdd.sortByKey().values()
+        else:
+            rdd = rdd.values()
 
         # count the resulting array in order to reindex (linearize) the keys
         count, zipped = zip_with_index(rdd)
@@ -207,7 +218,7 @@ class BoltArraySpark(BoltArray):
         reindexed = zipped.map(lambda kv: (tupleize(kv[1]), kv[0]))
 
         # since we can only filter over one axis, the remaining shape is always the following
-        remaining = list(swapped.shape[1:])
+        remaining = list(swapped.shape[len(axis):])
         if count != 0:
             shape = tuple([count] + remaining)
         else:
@@ -456,12 +467,17 @@ class BoltArraySpark(BoltArray):
         """
         Basic indexing (for slices or ints).
         """
-        index = tuple([slicify(s, d) for (s, d) in zip(index, self.shape)])
         key_slices = index[0:self.split]
         value_slices = index[self.split:]
 
         def key_check(key):
-            check = lambda kk, ss: ss.start <= kk < ss.stop and mod(kk - ss.start, ss.step) == 0
+            def inrange(k, s):
+                if s.step > 0:
+                    return s.start <= k < s.stop
+                else:
+                    return s.stop < k <= s.start
+            def check(k, s):
+                return inrange(k, s) and mod(k - s.start, s.step) == 0
             out = [check(k, s) for k, s in zip(key, key_slices)]
             return all(out)
 
@@ -469,7 +485,14 @@ class BoltArraySpark(BoltArray):
             return tuple([(k - s.start)/s.step for k, s in zip(key, key_slices)])
 
         filtered = self._rdd.filter(lambda kv: key_check(kv[0]))
-        rdd = filtered.map(lambda kv: (key_func(kv[0]), kv[1][value_slices]))
+
+        if self._split == self.ndim:
+            rdd = filtered.map(lambda kv: (key_func(kv[0]), kv[1]))
+        else:
+            # handle use of use slice.stop = -1 for a special case (see utils.slicify)
+            value_slices = [s if s.stop != -1 else slice(s.start, None, s.step) for s in value_slices]
+            rdd = filtered.map(lambda kv: (key_func(kv[0]), kv[1][value_slices]))
+
         shape = tuple([int(ceil((s.stop - s.start) / float(s.step))) for s in index])
         split = self.split
         return rdd, shape, split
@@ -526,7 +549,6 @@ class BoltArraySpark(BoltArray):
         behavior needed to be compatible with NumPy otherwise.
         """
         # find the single advanced index
-        index = list(index)
         loc = where([isinstance(i, (tuple, list, ndarray)) for i in index])[0][0]
         idx = list(index[loc])
 
@@ -543,7 +565,7 @@ class BoltArraySpark(BoltArray):
             rdd = self._rdd.filter(lambda kv: kv[0][loc] in idx).map(lambda kv: (newkey(kv[0]), kv[1]))
         # single advanced index is on a value -- use NumPy indexing
         else:
-            slices = [slice(0, size) for size in self.shape[self.split:]]
+            slices = [slice(0, None, None) for _ in self.values.shape]
             slices[loc - self.split] = idx
             rdd = self._rdd.map(lambda kv: (kv[0], kv[1][slices]))
         newshape = list(self.shape)
@@ -551,8 +573,9 @@ class BoltArraySpark(BoltArray):
         barray = self._constructor(rdd, shape=tuple(newshape)).__finalize__(self)
 
         # apply the rest of the simple indices
-        index[loc] = slice(None)
-        barray = barray[index]
+        new_index = index[:]
+        new_index[loc] = slice(0, None, None)
+        barray = barray[tuple(new_index)]
         return barray._rdd, barray.shape, barray.split
 
     def __getitem__(self, index):
@@ -561,8 +584,8 @@ class BoltArraySpark(BoltArray):
 
         Supports basic indexing with slices and ints, or advanced
         indexing with lists or ndarrays of integers.
-        Mixing basic and advanced indexing across axes is not
-        currently supported.
+        Mixing basic and advanced indexing across axes is currently supported
+        only for a single advanced index amidst multiple basic indices.
 
         Parameters
         ----------
@@ -573,7 +596,11 @@ class BoltArraySpark(BoltArray):
         -------
         BoltSparkArray
         """
-        index = list(tupleize(index))
+        if isinstance(index, tuple):
+            index = list(index)
+        else:
+            index = [index]
+        int_locs = where([isinstance(i, int) for i in index])[0]
 
         if len(index) > self.ndim:
             raise ValueError("Too many indices for array")
@@ -585,38 +612,31 @@ class BoltArraySpark(BoltArray):
         if len(index) < self.ndim:
             index += tuple([slice(0, None, None) for _ in range(self.ndim - len(index))])
 
-        # check bounds
+        # standardize slices and bounds checking
         for n, idx in enumerate(index):
             size = self.shape[n]
-            if isinstance(idx, slice):
-                minval = 0 if idx.start is None else idx.start
-                maxval = size if idx.stop is None else idx.stop
-                # account for negative indices
-                if minval < 0: minval = size + minval
-                if maxval < 0: maxval = size + maxval
-                # account for over-flowing the bounds
-                if minval < 0: minval = 0
-                if maxval > size: maxval = size
+            if isinstance(idx, (slice, int)):
+                slc = slicify(idx, size)
                 # throw an error if this would lead to an empty dimension in numpy
-                if minval > size-1 or maxval < 1 or minval >= maxval:
-                    raise ValueError("Index {} in in dimension {} with shape {} would "
-                                     "produce an empty dimension".format(idx, n, size))
+                if slc.step > 0:
+                    minval, maxval = slc.start, slc.stop
                 else:
-                    index[n] = slice(minval, maxval, idx.step)
+                    minval, maxval = slc.stop, slc.start
+                if minval > size-1 or maxval < 1 or minval >= maxval:
+                    raise ValueError("Index {} in dimension {} with shape {} would "
+                                     "produce an empty dimension".format(idx, n, size))
+                index[n] = slc
             else:
-                pos = [size + i if i<0 else i for i in array(idx).flatten()]
-                minval = min(pos)
-                maxval = max(pos)
-                if minval < 0 or maxval > size-1:
+                adjusted = array(idx)
+                inds = where(adjusted<0)
+                adjusted[inds] += size
+                if adjusted.min() < 0 or adjusted.max() > size-1:
                     raise ValueError("Index {} out of bounds in dimension {} with "
                                      "shape {}".format(idx, n, size))
-
-        # convert ints to lists if not all ints and slices
-        if not all([isinstance(i, (int, slice)) for i in index]):
-            index = tuple([[i] if isinstance(i, int) else i for i in index])
+                index[n] = adjusted
 
         # select basic or advanced indexing
-        if all([isinstance(i, (slice, int)) for i in index]):
+        if all([isinstance(i, slice) for i in index]):
             rdd, shape, split = self._getbasic(index)
         elif all([isinstance(i, (tuple, list, ndarray)) for i in index]):
             rdd, shape, split = self._getadvanced(index)
@@ -627,14 +647,19 @@ class BoltArraySpark(BoltArray):
                                       "with advanced indexing (lists, tuples, and ndarrays), "
                                       "can only have a single advanced index")
 
-        result = self._constructor(rdd, shape=shape, split=split).__finalize__(self)
+        # if any key indices used negative steps, records are no longer ordered
+        if self._ordered is False or any([isinstance(s, slice) and s.step<0 for s in index[:self.split]]):
+            ordered = False
+        else:
+            ordered = True
+
+        result = self._constructor(rdd, shape=shape, split=split, ordered=ordered).__finalize__(self)
 
         # squeeze out int dimensions (and squeeze to singletons if all ints)
-        if all([isinstance(i, int) for i in index]):
+        if len(int_locs) == self.ndim:
             return result.squeeze().toarray()[()]
         else:
-            tosqueeze = tuple([k for k, i in enumerate(index) if isinstance(i, int)])
-            return result.squeeze(tosqueeze)
+            return result.squeeze(tuple(int_locs))
 
     def chunk(self, size="150", axis=None, padding=None):
         """

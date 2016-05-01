@@ -2,7 +2,7 @@
 
 from setuptools import setup
 
-version = '0.3.3'
+version = '0.5.1'
 
 setup(
     name='bolt-python',
