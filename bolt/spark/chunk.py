@@ -175,7 +175,14 @@ class ChunkedArray(object):
 
         # undo chunking
         switch = self.switch
-        rdd = rdd.map(switch).groupByKey().mapValues(_unchunk)
+        rdd = rdd.map(switch)
+        # skip groupByKey if there is not actually any chunking
+        if array_equal(self.plan, self.vshape):
+            from pyspark.resultiterable import ResultIterable
+            rdd = rdd.map(lambda kv: (kv[0], ResultIterable((kv[1],))))
+        else:
+            rdd = rdd.groupByKey()
+        rdd = rdd.mapValues(_unchunk)
 
         if array_equal(self.vshape, [1]):
             rdd = rdd.mapValues(lambda v: squeeze(v))
