@@ -155,12 +155,12 @@ class ChunkedArray(object):
 
         if self.uniform:
             def _unchunk(v):
-                idx, data = zip(*v.data)
+                idx, data = zip(*v)
                 sorted_idx = tuplesort(idx)
                 return asarray(data)[sorted_idx].reshape(full_shape).transpose(perm).reshape(vshape)
         else:
             def _unchunk(v):
-                idx, data = zip(*v.data)
+                idx, data = zip(*v)
                 arr = empty(nchunks, dtype='object')
                 for (i, d) in zip(idx, data):
                     arr[i] = d
@@ -179,9 +179,9 @@ class ChunkedArray(object):
         # skip groupByKey if there is not actually any chunking
         if array_equal(self.plan, self.vshape):
             from pyspark.resultiterable import ResultIterable
-            rdd = rdd.map(lambda kv: (kv[0], ResultIterable((kv[1],))))
+            rdd = rdd.map(lambda kv: (kv[0], [kv[1]]))
         else:
-            rdd = rdd.groupByKey()
+            rdd = rdd.map(lambda kv: (kv[0], [kv[1]])).reduceByKey(lambda x, y: x+y)
         rdd = rdd.mapValues(_unchunk)
 
         if array_equal(self.vshape, [1]):
@@ -238,13 +238,13 @@ class ChunkedArray(object):
         rdd = self._rdd.map(_relabel)
 
         # group the new chunks together
-        rdd = rdd.groupByKey()
+        rdd = rdd.map(lambda kv: (kv[0], [kv[1]])).reduceByKey(lambda x, y: x+y)
 
         # reassemble the pieces in the chunks by sorting and then stacking
         uniform = result.uniform
 
         def _rebuild(v):
-            labels, data = zip(*v.data)
+            labels, data = zip(*v)
             sortinginds = tuplesort(labels)
 
             if uniform:
