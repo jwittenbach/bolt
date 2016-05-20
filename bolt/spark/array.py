@@ -7,7 +7,7 @@ from bolt.base import BoltArray
 from bolt.spark.stack import StackedArray
 from bolt.spark.utils import zip_with_index
 from bolt.spark.statcounter import StatCounter
-from bolt.utils import slicify, listify, tupleize, argpack, inshape, istransposeable, isreshapeable
+from bolt.utils import slicify, listify, tupleize, argpack, inshape, istransposeable, isreshapeable, tuplesort
 
 
 class BoltArraySpark(BoltArray):
@@ -990,15 +990,25 @@ class BoltArraySpark(BoltArray):
         from bolt.local.array import BoltArrayLocal
         return BoltArrayLocal(self.toarray())
 
-    def toarray(self):
+    def toarray(self, local_sort=True):
         """
         Returns the contents as a local array.
 
         Will likely cause memory problems for large objects.
         """
-        rdd = self._rdd if self._ordered else self._rdd.sortByKey()
-        x = rdd.values().collect()
-        return asarray(x).reshape(self.shape)
+        if local_sort:
+            inds, vals = zip(*self.tordd().collect())
+            if self._ordered:
+                arr = asarray(vals)
+            else:
+                sorted_inds = tuplesort(idx)
+                arr = asarray(vals)[sorted_inds]
+            return arr.reshape(self.shape)
+
+        else:
+            rdd = self._rdd if self._ordered else self._rdd.sortByKey()
+            x = rdd.values().collect()
+            return asarray(x).reshape(self.shape)
 
     def tordd(self):
         """
