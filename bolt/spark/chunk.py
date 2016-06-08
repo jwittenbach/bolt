@@ -195,7 +195,7 @@ class ChunkedArray(object):
         return BoltArraySpark(rdd, shape=newshape, split=self._split,
                               dtype=self.dtype, ordered=False)
 
-    def keys_to_values(self, axes, size=None):
+    def keys_to_values(self, axes, size=None, npartitions=None):
         """
         Move indices in the keys into the values.
 
@@ -209,6 +209,10 @@ class ChunkedArray(object):
         size : tuple, optional, default=None
             Size of chunks for the values along the new dimensions.
             If None, then no chunking for all axes (number of chunks = 1)
+
+        npartitions: int, options, default=None
+            Number of partitions to use in the resulting array. If None,
+            will default to one partition per record
 
         Returns
         -------
@@ -240,13 +244,22 @@ class ChunkedArray(object):
         rdd = self._rdd.map(_relabel)
 
         # group the new chunks together
-        rdd = rdd.groupByKey()
+        if npartitions is None:
+            npartitions= prod(self.kshape[~kmask]) * prod(self.getnumber(self.plan, self.vshape))
+        ranges = newshape[:newsplit] + tuple(self.getnumber(newplan, newshape[newsplit:]))
+        from numpy import ravel_multi_index
+        def partitioner(key):
+            k = key[0] + key[1]
+            return ravel_multi_index(k, ranges)
+
+        rdd = rdd.groupByKey(numPartitions=npartitions, partitionFunc=partitioner)
 
         # reassemble the pieces in the chunks by sorting and then stacking
         uniform = result.uniform
 
         def _rebuild(v):
             labels, data = zip(*v.data)
+            print('tuple sorting')
             sortinginds = tuplesort(labels)
 
             if uniform:
