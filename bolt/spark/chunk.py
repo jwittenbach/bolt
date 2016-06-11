@@ -1,6 +1,6 @@
 from numpy import zeros, ones, asarray, r_, concatenate, arange, ceil, prod, \
     empty, mod, floor, any, ndarray, amin, amax, array_equal, squeeze, array, \
-    where, random
+    where, random, ravel_multi_index, argsort
 
 from itertools import product
 
@@ -235,7 +235,8 @@ class ChunkedArray(object):
             movingkeys, stationarykeys = k[kmask], k[~kmask]
             newchks = [int(m) for m in movingkeys/size]  # element-wise integer division that works in Python 2 and 3
             labels = mod(movingkeys, size)
-            return (tuple(stationarykeys), tuple(newchks)+tuple(chk)), (tuple(labels), data)
+            label = ravel_multi_index(labels, size)
+            return (tuple(stationarykeys), tuple(newchks)+tuple(chk)), (label, data)
 
         rdd = self._rdd.map(_relabel)
 
@@ -247,7 +248,7 @@ class ChunkedArray(object):
 
         def _rebuild(v):
             labels, data = zip(*v.data)
-            sortinginds = tuplesort(labels)
+            sortinginds = argsort(labels)
 
             if uniform:
                 labelshape = tuple(size)
