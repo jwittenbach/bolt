@@ -214,6 +214,9 @@ class ChunkedArray(object):
         -------
         ChunkedArray
         """
+        if len(axes) == 0:
+            return self
+
         kmask = self.kmask(axes)
 
         if size is None:
@@ -246,19 +249,29 @@ class ChunkedArray(object):
         # reassemble the pieces in the chunks by sorting and then stacking
         uniform = result.uniform
 
-        def _rebuild(v):
+        n = len(axes)
+        newnumber = result.getnumber(result.plan[:n], result.vshape[:n])
+        edges = mod(result.vshape[:n], newnumber)
+        for i in range(n):
+            if edges[i] == 0:
+                edges[i] = result.plan[i]
+        def _rebuild(kv):
+            k, v = kv
+
             labels, data = zip(*v.data)
-            sortinginds = argsort(labels)
+            sortinginds = tuplesort(labels)
 
             if uniform:
                 labelshape = tuple(size)
             else:
-                labelshape = tuple(amax(labels, axis=0) - amin(labels, axis=0) + 1)
+                chk = k[1]
+                labelshape = tuple([e if c == n-1 else s for e, c, n, s in zip(edges, chk, newnumber, size)])
+
             valshape = data[0].shape
             fullshape = labelshape + valshape
-            return asarray(data)[sortinginds].reshape(fullshape)
+            return k, asarray(data)[sortinginds].reshape(fullshape)
 
-        result._rdd = rdd.mapValues(_rebuild)
+        result._rdd = rdd.map(_rebuild)
 
         if array_equal(self.vshape, [1]):
             result._rdd = result._rdd.mapValues(lambda v: squeeze(v))
