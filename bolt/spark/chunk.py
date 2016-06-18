@@ -184,7 +184,7 @@ class ChunkedArray(object):
             rdd = rdd.mapValues(lambda v: zip(*(v,)))
         else:
             rdd = rdd.groupByKey().mapValues(lambda v: zip(*v.data))
-        rdd = rdd.mapValues(_unchunk)
+        rdd = rdd.mapValues(_unchunk).sortByKey()
 
         if array_equal(self.vshape, [1]):
             rdd = rdd.mapValues(lambda v: squeeze(v))
@@ -193,7 +193,7 @@ class ChunkedArray(object):
             newshape = self.shape
 
         return BoltArraySpark(rdd, shape=newshape, split=self._split,
-                              dtype=self.dtype, ordered=False)
+                              dtype=self.dtype, ordered=True)
 
     def keys_to_values(self, axes, size=None):
         """
